@@ -8,6 +8,7 @@ iPhone（ntfy）に通知する。GitHub Actionsで定期実行する前提（Ma
   python3 watch.py --list   # 今ページに出ている製品を表示するだけ
 """
 
+import html
 import json
 import os
 import pathlib
@@ -25,7 +26,11 @@ WATCH_URLS = [
 ]
 
 # 製品名でさらに絞る（空のリスト [] にすると、ページに新しく出たものをすべて通知）
-TITLE_MUST = ["M5 Pro", "18コアCPUと20コアGPU"]
+TITLE_MUST = ["14インチ", "M5 Pro", "18コアCPUと20コアGPU"]
+
+# 製品ページで確認するメモリ容量とSSD容量（ここに合うものだけ通知）
+MEMORY_OK = ["48GB", "64GB"]
+STORAGE_OK = ["2TB"]
 
 # Nano-texture版も通知するか
 ALLOW_NANO = True
@@ -70,6 +75,19 @@ def wanted(title):
     return True
 
 
+def read_specs(url):
+    """製品ページからメモリ・SSD・価格を読み取る"""
+    text = html.unescape(fetch(url))
+    mem = re.search(r"(\d+)\s*GB\s*ユニファイドメモリ", text)
+    ssd = re.search(r"(\d+)\s*TB\s*SSD", text)
+    price = re.search(r"([\d,]{6,})\s*円", text)
+    return (
+        f"{mem.group(1)}GB" if mem else None,
+        f"{ssd.group(1)}TB" if ssd else None,
+        f"{price.group(1)}円" if price else "価格不明",
+    )
+
+
 def notify(title, message, url=None):
     if not NTFY_TOPIC:
         log("NTFY_TOPICが未設定のため通知できません")
@@ -112,17 +130,29 @@ def main():
         previous = {}
 
     new_codes = [c for c in current if c not in previous]
+    state = {c: previous[c] for c in current if c in previous}  # 消えたものは忘れる→再入荷で再通知
+
     for code in new_codes:
         v = current[code]
-        if wanted(v["title"]):
-            nano = "（Nano-texture）" if "Nano" in v["title"] else ""
-            notify(f"入荷！ 14インチ M5 Pro 48GB/2TB{nano}", v["title"][:90], v["url"])
-            log(f"通知: {code} {v['title']}")
+        entry = {"title": v["title"]}
+        if not wanted(v["title"]):
+            log(f"新着だが製品名が条件外: {code} {v['title']}")
         else:
-            log(f"新着だが条件外: {code} {v['title']}")
+            try:
+                mem, ssd, price = read_specs(v["url"])
+            except Exception as e:
+                log(f"製品ページの取得に失敗（次回再確認）: {code} : {e}")
+                continue  # 状態に入れない → 次回もう一度確認する
+            entry.update({"mem": mem, "ssd": ssd})
+            if mem in MEMORY_OK and ssd in STORAGE_OK:
+                nano = "（Nano-texture）" if "Nano" in v["title"] else ""
+                notify(f"入荷！ 14インチ M5 Pro {mem}/{ssd}{nano}", f"{price}　{v['title'][:70]}", v["url"])
+                log(f"通知: {code} {mem} {ssd} {price}")
+            else:
+                log(f"新着だが仕様が条件外: {code} {mem} {ssd} {v['title']}")
+        state[code] = entry
 
-    STATE_FILE.write_text(json.dumps({c: v["title"] for c, v in current.items()},
-                                     ensure_ascii=False, indent=2, sort_keys=True))
+    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True))
     log(f"チェック完了（掲載{len(current)}件、新着{len(new_codes)}件）")
 
 
